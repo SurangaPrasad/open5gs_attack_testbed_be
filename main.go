@@ -115,6 +115,31 @@ func main() {
 	r.POST("/stop-traffic-test", handlers.StopBinningTrafficTest(clientset))
 	r.GET("/traffic-test-status", handlers.CheckBinningTrafficTestStatus(clientset))
 
+	// DDoS Attack endpoints
+	r.POST("/run-ddos-attack", handlers.RunICMPDDoSAttack(clientset))
+	r.POST("/stop-ddos-attack", handlers.StopDDoSAttack(clientset))
+	r.GET("/ddos-attack-status", handlers.CheckDDoSAttackStatus(clientset))
+
+	// GTP Encapsulation Attack endpoints
+	r.POST("/run-gtp-encapsulation", handlers.RunGTPEncapsulationAttack(clientset))
+	r.POST("/stop-gtp-encapsulation", handlers.StopGTPEncapsulationAttack(clientset))
+	r.GET("/gtp-encapsulation-status", handlers.CheckGTPEncapsulationAttackStatus(clientset))
+
+	// GTP-U TEID Brute-Force Attack endpoints
+	r.POST("/run-teid-bruteforce", handlers.RunTEIDBruteForceAttack(clientset))
+	r.POST("/stop-teid-bruteforce", handlers.StopTEIDBruteForceAttack(clientset))
+	r.GET("/teid-bruteforce-status", handlers.CheckTEIDBruteForceAttackStatus(clientset))
+
+	// Intra-UPF UE DoS Attack endpoints
+	r.POST("/run-upf-dos", handlers.RunUPFDosAttack(clientset))
+	r.POST("/stop-upf-dos", handlers.StopUPFDosAttack(clientset))
+	r.GET("/upf-dos-status", handlers.CheckUPFDosAttackStatus(clientset))
+
+	// Malformed GTP-U Attack endpoints
+	r.POST("/run-malformed-gtpu", handlers.RunMalformedGTPUAttack(clientset))
+	r.POST("/stop-malformed-gtpu", handlers.StopMalformedGTPUAttack(clientset))
+	r.GET("/malformed-gtpu-status", handlers.CheckMalformedGTPUAttackStatus(clientset))
+
 	// URL List
 	// http://localhost:8081/core-network
 	// http://localhost:8081/access-network
@@ -124,6 +149,21 @@ func main() {
 	// http://localhost:8081/run-traffic-test
 	// http://localhost:8081/stop-traffic-test
 	// http://localhost:8081/traffic-test-status
+	// http://localhost:8081/run-ddos-attack
+	// http://localhost:8081/stop-ddos-attack
+	// http://localhost:8081/ddos-attack-status
+	// http://localhost:8081/run-gtp-encapsulation
+	// http://localhost:8081/stop-gtp-encapsulation
+	// http://localhost:8081/gtp-encapsulation-status
+	// http://localhost:8081/run-teid-bruteforce
+	// http://localhost:8081/stop-teid-bruteforce
+	// http://localhost:8081/teid-bruteforce-status
+	// http://localhost:8081/run-upf-dos
+	// http://localhost:8081/stop-upf-dos
+	// http://localhost:8081/upf-dos-status
+	// http://localhost:8081/run-malformed-gtpu
+	// http://localhost:8081/stop-malformed-gtpu
+	// http://localhost:8081/malformed-gtpu-status
 
 	logger.Println("Starting server with forced terminal output...")
 	fmt.Println("Server ready to accept connections")

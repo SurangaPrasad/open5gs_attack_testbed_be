@@ -7,7 +7,6 @@ import (
 	"os"
 	"os/exec"
 	"strings"
-	"time"
 
 	"github.com/gin-gonic/gin"
 	"k8s.io/client-go/kubernetes"
@@ -150,10 +149,9 @@ func RunBinningTrafficTest(clientset *kubernetes.Clientset) gin.HandlerFunc {
 			return
 		}
 
-		// Run the Python script in the background
-		consoleLog("[TRAFFIC] Starting Python script in the background...\n")
-		// Using nohup and & to run the script in the background
-		runCmd := exec.Command("kubectl", "exec", req.PodName, "--", "bash", "-c", "nohup python3 /binning_traffic.py > /dev/null 2>&1 &")
+		// Run the Python script
+		consoleLog("[TRAFFIC] Starting Python script...\n")
+		runCmd := exec.Command("kubectl", "exec", req.PodName, "--", "python3", "/binning_traffic.py")
 		consoleLog("[TRAFFIC] Running command: %s\n", runCmd.String())
 		output, err = runCmd.CombinedOutput()
 		if err != nil {
@@ -165,39 +163,10 @@ func RunBinningTrafficTest(clientset *kubernetes.Clientset) gin.HandlerFunc {
 			return
 		}
 
-		// Step 5: Verify the process is running
-		consoleLog("[TRAFFIC] Verifying process is running...\n")
-
-		// Give the process a moment to start
-		time.Sleep(2 * time.Second)
-
-		// Check if the Python process is running
-		checkCmd := exec.Command("kubectl", "exec", req.PodName, "--", "pgrep", "-f", "python3.*binning_traffic.py")
-		processOutput, err := checkCmd.CombinedOutput()
-
-		if err != nil {
-			consoleLog("[ERROR] Process verification failed: %v\nOutput: %s\n", err, processOutput)
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "Traffic test was started but is not running",
-				"details": string(processOutput),
-			})
-			return
-		}
-
-		processID := strings.TrimSpace(string(processOutput))
-		if processID == "" {
-			consoleLog("[ERROR] Process not found after starting\n")
-			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":   "Traffic test was started but process not found",
-				"details": "No process ID returned from pgrep command",
-			})
-			return
-		}
-
-		consoleLog("[SUCCESS] Traffic test started successfully! Process ID: %s\n", processID)
+		consoleLog("[SUCCESS] Traffic test started successfully!\n")
 		c.JSON(http.StatusOK, gin.H{
-			"message":    "Traffic test started successfully",
-			"process_id": processID,
+			"message": "Traffic test started successfully",
+			"output":  string(output),
 		})
 	}
 }
