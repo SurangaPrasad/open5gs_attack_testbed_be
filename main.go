@@ -140,6 +140,12 @@ func main() {
 	r.POST("/stop-malformed-gtpu", handlers.StopMalformedGTPUAttack(clientset))
 	r.GET("/malformed-gtpu-status", handlers.CheckMalformedGTPUAttackStatus(clientset))
 
+	// Trace collector routes
+	r.POST("/traces/start", handlers.StartTraceCollector(clientset))
+	r.POST("/traces/stop", handlers.StopTraceCollector())
+	r.GET("/traces/status", handlers.GetTraceCollectorStatus())
+	r.PUT("/traces/configure", handlers.ConfigureTraceCollector())
+
 	// URL List
 	// http://localhost:8081/core-network
 	// http://localhost:8081/access-network
@@ -164,6 +170,10 @@ func main() {
 	// http://localhost:8081/run-malformed-gtpu
 	// http://localhost:8081/stop-malformed-gtpu
 	// http://localhost:8081/malformed-gtpu-status
+	// http://localhost:8081/traces/start
+	// http://localhost:8081/traces/stop
+	// http://localhost:8081/traces/status
+	// http://localhost:8081/traces/configure
 
 	logger.Println("Starting server with forced terminal output...")
 	fmt.Println("Server ready to accept connections")
