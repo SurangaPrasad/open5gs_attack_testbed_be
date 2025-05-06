@@ -1,0 +1,2 @@
+2025-04-30 16:19:37 DEBUG cic.cs.unb.ca.ifm.App    
+No X11 DISPLAY variable was set, but this program performed an operation which requires it.
