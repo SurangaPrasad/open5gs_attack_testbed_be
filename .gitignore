@@ -1,2 +1,4 @@
 pcap_files/
 stripe/
+flow_output/
+pcap_files_processed/

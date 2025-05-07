@@ -216,111 +216,38 @@ func findUPFPod(clientset *kubernetes.Clientset) (string, error) {
 }
 
 // generateFlowSessions processes a PCAP file with CICFlowMeter to generate network flow sessions
-func generateFlowSessions(outputFile, consoleLog)
-	// Generate flow sessions from the processed file
-	func generateFlowSessions(inputFile string, consoleLog func(format string, args ...interface{})) {
-		baseName := filepath.Base(inputFile)
-		baseNameWithoutExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
-		
-		consoleLog("[TRACE] Generating flow sessions for %s using CICFlowMeter...\n", inputFile)
-
-		// Create the flow output directory if it does not exist
-		if err := os.MkdirAll(traceConfig.FlowOutputDirectory, 0755); err != nil {
-			consoleLog("[TRACE-ERROR] Failed to create flow output directory: %v\n", err)
-			return
-		}
-
-		// Check if already processed
-		outputFilename := baseNameWithoutExt + "_Flow.csv"
-		targetOutputFile := filepath.Join(traceConfig.FlowOutputDirectory, outputFilename)
-		
-		if _, err := os.Stat(targetOutputFile); err == nil {
-			consoleLog("[TRACE] Flow file %s already exists in output directory, skipping...\n", outputFilename)
-			return
-		}
-
-		// Get absolute paths
-		absInputFile, err := filepath.Abs(inputFile)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute path: %v\n", err)
-			return
-		}
-
-		absOutputDir, err := filepath.Abs(traceConfig.FlowOutputDirectory)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute output path: %v\n", err)
-			return
-		}
-
-		// Use our wrapper script
-		wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
-		if _, err := os.Stat(wrapperScript); err != nil {
-			consoleLog("[TRACE-ERROR] Wrapper script not found: %v\n", err)
-			return
-		}
-
-		consoleLog("[TRACE] Running CICFlowMeter wrapper script...\n")
-		cmd := exec.Command(wrapperScript, absInputFile, absOutputDir)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error running CICFlowMeter: %v\nOutput: %s\n", err, output)
-		} else {
-			consoleLog("[TRACE] CICFlowMeter execution successful\n%s\n", string(output))
-		}
-
-		// Verify files were created in our flow output directory
-		files, err := filepath.Glob(filepath.Join(absOutputDir, "*.csv"))
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error checking output directory: %v\n", err)
-		} else if len(files) > 0 {
-			consoleLog("[TRACE] Found %d CSV files in output directory\n", len(files))
-		} else {
-			consoleLog("[TRACE-WARNING] No CSV files found in output directory, creating default\n")
-			
-			// Create a simple CSV with headers as fallback
-			defaultOutputFile := filepath.Join(absOutputDir, baseNameWithoutExt+"_Flow.csv")
-			headers := "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s\n"
-			if err := os.WriteFile(defaultOutputFile, []byte(headers), 0644); err != nil {
-				consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", err)
-			} else {
-				consoleLog("[TRACE] Created default flow file: %s\n", defaultOutputFile)
-			}
-		}
-	}
+func generateFlowSessions(inputFile string, consoleLog func(format string, args ...interface{})) {
 	baseName := filepath.Base(inputFile)
 	baseNameWithoutExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
 
 	consoleLog("[TRACE] Generating flow sessions for %s using CICFlowMeter...\n", inputFile)
 
+	// Get absolute paths
+	absInputFile, err := filepath.Abs(inputFile)
+	if err != nil {
+		consoleLog("[TRACE-ERROR] Failed to get absolute path for input: %v\n", err)
+		return
+	}
+
+	// Use absolute path for flow output directory
+	absFlowOutputDir := "/home/open5gs1/Documents/open5gs-be/flow_output"
+
 	// Create the flow output directory if it does not exist
-	if err := os.MkdirAll(traceConfig.FlowOutputDirectory, 0755); err != nil {
+	if err := os.MkdirAll(absFlowOutputDir, 0755); err != nil {
 		consoleLog("[TRACE-ERROR] Failed to create flow output directory: %v\n", err)
 		return
 	}
 
 	// Check if already processed
 	outputFilename := baseNameWithoutExt + "_Flow.csv"
-	targetOutputFile := filepath.Join(traceConfig.FlowOutputDirectory, outputFilename)
+	targetOutputFile := filepath.Join(absFlowOutputDir, outputFilename)
 
 	if _, err := os.Stat(targetOutputFile); err == nil {
 		consoleLog("[TRACE] Flow file %s already exists in output directory, skipping...\n", outputFilename)
 		return
 	}
 
-	// Get absolute paths
-	absInputFile, err := filepath.Abs(inputFile)
-	if err != nil {
-		consoleLog("[TRACE-ERROR] Failed to get absolute path: %v\n", err)
-		return
-	}
-
-	absOutputDir, err := filepath.Abs(traceConfig.FlowOutputDirectory)
-	if err != nil {
-		consoleLog("[TRACE-ERROR] Failed to get absolute output path: %v\n", err)
-		return
-	}
-
-	// Use our wrapper script
+	// Use our wrapper script with absolute paths
 	wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
 	if _, err := os.Stat(wrapperScript); err != nil {
 		consoleLog("[TRACE-ERROR] Wrapper script not found: %v\n", err)
@@ -328,7 +255,7 @@ func generateFlowSessions(outputFile, consoleLog)
 	}
 
 	consoleLog("[TRACE] Running CICFlowMeter wrapper script...\n")
-	cmd := exec.Command(wrapperScript, absInputFile, absOutputDir)
+	cmd := exec.Command(wrapperScript, absInputFile, absFlowOutputDir)
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		consoleLog("[TRACE-ERROR] Error running CICFlowMeter: %v\nOutput: %s\n", err, output)
@@ -337,7 +264,7 @@ func generateFlowSessions(outputFile, consoleLog)
 	}
 
 	// Verify files were created in our flow output directory
-	files, err := filepath.Glob(filepath.Join(absOutputDir, "*.csv"))
+	files, err := filepath.Glob(filepath.Join(absFlowOutputDir, "*.csv"))
 	if err != nil {
 		consoleLog("[TRACE-ERROR] Error checking output directory: %v\n", err)
 	} else if len(files) > 0 {
@@ -346,7 +273,7 @@ func generateFlowSessions(outputFile, consoleLog)
 		consoleLog("[TRACE-WARNING] No CSV files found in output directory, creating default\n")
 
 		// Create a simple CSV with headers as fallback
-		defaultOutputFile := filepath.Join(absOutputDir, baseNameWithoutExt+"_Flow.csv")
+		defaultOutputFile := filepath.Join(absFlowOutputDir, baseNameWithoutExt+"_Flow.csv")
 		headers := "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s\n"
 		if err := os.WriteFile(defaultOutputFile, []byte(headers), 0644); err != nil {
 			consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", err)
@@ -358,9 +285,25 @@ func generateFlowSessions(outputFile, consoleLog)
 
 // processTraceFile processes a trace file to remove GTP headers using the stripe utility
 func processTraceFile(inputFile string, consoleLog func(format string, args ...interface{})) {
+	// Convert relative paths to absolute paths
+	absInputFile, err := filepath.Abs(inputFile)
+	if err != nil {
+		consoleLog("[TRACE-ERROR] Failed to get absolute path for input file: %v\n", err)
+		return
+	}
+
 	// Generate output file name by prepending "gtp_removed_" to the base filename
-	baseName := filepath.Base(inputFile)
-	outputFile := filepath.Join(traceConfig.ProcessedDestination, "gtp_removed_"+baseName)
+	baseName := filepath.Base(absInputFile)
+
+	// Convert relative ProcessedDestination to absolute path
+	absProcessedDir, err := filepath.Abs(traceConfig.ProcessedDestination)
+	if err != nil {
+		consoleLog("[TRACE-ERROR] Failed to get absolute path for processed directory: %v\n", err)
+		return
+	}
+
+	// Build the absolute output file path
+	outputFile := filepath.Join(absProcessedDir, "gtp_removed_"+baseName)
 
 	// Check if output file already exists
 	if _, err := os.Stat(outputFile); err == nil {
@@ -368,88 +311,18 @@ func processTraceFile(inputFile string, consoleLog func(format string, args ...i
 
 		// Even if the file exists, we still want to generate flow sessions
 		generateFlowSessions(outputFile, consoleLog)
-	// Generate flow sessions from the processed file
-	func generateFlowSessions(inputFile string, consoleLog func(format string, args ...interface{})) {
-		baseName := filepath.Base(inputFile)
-		baseNameWithoutExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
-		
-		consoleLog("[TRACE] Generating flow sessions for %s using CICFlowMeter...\n", inputFile)
-
-		// Create the flow output directory if it does not exist
-		if err := os.MkdirAll(traceConfig.FlowOutputDirectory, 0755); err != nil {
-			consoleLog("[TRACE-ERROR] Failed to create flow output directory: %v\n", err)
-			return
-		}
-
-		// Check if already processed
-		outputFilename := baseNameWithoutExt + "_Flow.csv"
-		targetOutputFile := filepath.Join(traceConfig.FlowOutputDirectory, outputFilename)
-		
-		if _, err := os.Stat(targetOutputFile); err == nil {
-			consoleLog("[TRACE] Flow file %s already exists in output directory, skipping...\n", outputFilename)
-			return
-		}
-
-		// Get absolute paths
-		absInputFile, err := filepath.Abs(inputFile)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute path: %v\n", err)
-			return
-		}
-
-		absOutputDir, err := filepath.Abs(traceConfig.FlowOutputDirectory)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute output path: %v\n", err)
-			return
-		}
-
-		// Use our wrapper script
-		wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
-		if _, err := os.Stat(wrapperScript); err != nil {
-			consoleLog("[TRACE-ERROR] Wrapper script not found: %v\n", err)
-			return
-		}
-
-		consoleLog("[TRACE] Running CICFlowMeter wrapper script...\n")
-		cmd := exec.Command(wrapperScript, absInputFile, absOutputDir)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error running CICFlowMeter: %v\nOutput: %s\n", err, output)
-		} else {
-			consoleLog("[TRACE] CICFlowMeter execution successful\n%s\n", string(output))
-		}
-
-		// Verify files were created in our flow output directory
-		files, err := filepath.Glob(filepath.Join(absOutputDir, "*.csv"))
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error checking output directory: %v\n", err)
-		} else if len(files) > 0 {
-			consoleLog("[TRACE] Found %d CSV files in output directory\n", len(files))
-		} else {
-			consoleLog("[TRACE-WARNING] No CSV files found in output directory, creating default\n")
-			
-			// Create a simple CSV with headers as fallback
-			defaultOutputFile := filepath.Join(absOutputDir, baseNameWithoutExt+"_Flow.csv")
-			headers := "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s\n"
-			if err := os.WriteFile(defaultOutputFile, []byte(headers), 0644); err != nil {
-				consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", err)
-			} else {
-				consoleLog("[TRACE] Created default flow file: %s\n", defaultOutputFile)
-			}
-		}
-	}
 		return
 	}
 
 	// Ensure the processed destination directory exists with correct permissions
-	if err := os.MkdirAll(traceConfig.ProcessedDestination, 0755); err != nil {
+	if err := os.MkdirAll(absProcessedDir, 0755); err != nil {
 		consoleLog("[TRACE-ERROR] Failed to create or verify processed directory: %v\n", err)
 		return
 	}
 
 	// Set directory permissions to ensure we can write to it
-	if err := os.Chmod(traceConfig.ProcessedDestination, 0755); err != nil {
-		consoleLog("[TRACE-WARNING] Failed to set permissions on processed directory: %v\n", err)
+	if err := os.Chmod(absProcessedDir, 0755); err != nil {
+		consoleLog("[TRACE-WARNING] Failed to set permissions on processed directory: %v\n")
 	}
 
 	// Pre-create an empty output file with correct permissions
@@ -464,11 +337,17 @@ func processTraceFile(inputFile string, consoleLog func(format string, args ...i
 		consoleLog("[TRACE-WARNING] Failed to set permissions on output file: %v\n", err)
 	}
 
-	consoleLog("[TRACE] Processing file %s to remove GTP headers...\n", inputFile)
+	consoleLog("[TRACE] Processing file %s to remove GTP headers...\n", absInputFile)
 
-	// Build and execute the stripe command
+	// Verify that the stripe utility exists
+	if _, err := os.Stat(traceConfig.StripeUtilityPath); os.IsNotExist(err) {
+		consoleLog("[TRACE-ERROR] Stripe utility not found at %s\n", traceConfig.StripeUtilityPath)
+		return
+	}
+
+	// Build and execute the stripe command with absolute paths
 	cmd := exec.Command(traceConfig.StripeUtilityPath,
-		"-r", inputFile,
+		"-r", absInputFile,
 		"-w", outputFile)
 
 	// Set command working directory to ensure relative paths work
@@ -477,7 +356,7 @@ func processTraceFile(inputFile string, consoleLog func(format string, args ...i
 	output, err := cmd.CombinedOutput()
 	if err != nil {
 		consoleLog("[TRACE-ERROR] Error processing file %s: %v\nOutput: %s\n",
-			inputFile, err, output)
+			absInputFile, err, output)
 
 		// Check if output file was created despite error
 		if _, statErr := os.Stat(outputFile); statErr == nil {
@@ -485,76 +364,6 @@ func processTraceFile(inputFile string, consoleLog func(format string, args ...i
 			if fileInfo.Size() > 0 {
 				consoleLog("[TRACE] Output file was created with size %d bytes. Proceeding despite error.\n", fileInfo.Size())
 				generateFlowSessions(outputFile, consoleLog)
-	// Generate flow sessions from the processed file
-	func generateFlowSessions(inputFile string, consoleLog func(format string, args ...interface{})) {
-		baseName := filepath.Base(inputFile)
-		baseNameWithoutExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
-		
-		consoleLog("[TRACE] Generating flow sessions for %s using CICFlowMeter...\n", inputFile)
-
-		// Create the flow output directory if it does not exist
-		if err := os.MkdirAll(traceConfig.FlowOutputDirectory, 0755); err != nil {
-			consoleLog("[TRACE-ERROR] Failed to create flow output directory: %v\n", err)
-			return
-		}
-
-		// Check if already processed
-		outputFilename := baseNameWithoutExt + "_Flow.csv"
-		targetOutputFile := filepath.Join(traceConfig.FlowOutputDirectory, outputFilename)
-		
-		if _, err := os.Stat(targetOutputFile); err == nil {
-			consoleLog("[TRACE] Flow file %s already exists in output directory, skipping...\n", outputFilename)
-			return
-		}
-
-		// Get absolute paths
-		absInputFile, err := filepath.Abs(inputFile)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute path: %v\n", err)
-			return
-		}
-
-		absOutputDir, err := filepath.Abs(traceConfig.FlowOutputDirectory)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute output path: %v\n", err)
-			return
-		}
-
-		// Use our wrapper script
-		wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
-		if _, err := os.Stat(wrapperScript); err != nil {
-			consoleLog("[TRACE-ERROR] Wrapper script not found: %v\n", err)
-			return
-		}
-
-		consoleLog("[TRACE] Running CICFlowMeter wrapper script...\n")
-		cmd := exec.Command(wrapperScript, absInputFile, absOutputDir)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error running CICFlowMeter: %v\nOutput: %s\n", err, output)
-		} else {
-			consoleLog("[TRACE] CICFlowMeter execution successful\n%s\n", string(output))
-		}
-
-		// Verify files were created in our flow output directory
-		files, err := filepath.Glob(filepath.Join(absOutputDir, "*.csv"))
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error checking output directory: %v\n", err)
-		} else if len(files) > 0 {
-			consoleLog("[TRACE] Found %d CSV files in output directory\n", len(files))
-		} else {
-			consoleLog("[TRACE-WARNING] No CSV files found in output directory, creating default\n")
-			
-			// Create a simple CSV with headers as fallback
-			defaultOutputFile := filepath.Join(absOutputDir, baseNameWithoutExt+"_Flow.csv")
-			headers := "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s\n"
-			if err := os.WriteFile(defaultOutputFile, []byte(headers), 0644); err != nil {
-				consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", err)
-			} else {
-				consoleLog("[TRACE] Created default flow file: %s\n", defaultOutputFile)
-			}
-		}
-	}
 				return
 			}
 		}
@@ -562,80 +371,10 @@ func processTraceFile(inputFile string, consoleLog func(format string, args ...i
 		return
 	}
 
-	consoleLog("[TRACE] Successfully processed %s -> %s\n", inputFile, outputFile)
+	consoleLog("[TRACE] Successfully processed %s -> %s\n", absInputFile, outputFile)
 
 	// Generate flow sessions from the processed file
 	generateFlowSessions(outputFile, consoleLog)
-	// Generate flow sessions from the processed file
-	func generateFlowSessions(inputFile string, consoleLog func(format string, args ...interface{})) {
-		baseName := filepath.Base(inputFile)
-		baseNameWithoutExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
-		
-		consoleLog("[TRACE] Generating flow sessions for %s using CICFlowMeter...\n", inputFile)
-
-		// Create the flow output directory if it does not exist
-		if err := os.MkdirAll(traceConfig.FlowOutputDirectory, 0755); err != nil {
-			consoleLog("[TRACE-ERROR] Failed to create flow output directory: %v\n", err)
-			return
-		}
-
-		// Check if already processed
-		outputFilename := baseNameWithoutExt + "_Flow.csv"
-		targetOutputFile := filepath.Join(traceConfig.FlowOutputDirectory, outputFilename)
-		
-		if _, err := os.Stat(targetOutputFile); err == nil {
-			consoleLog("[TRACE] Flow file %s already exists in output directory, skipping...\n", outputFilename)
-			return
-		}
-
-		// Get absolute paths
-		absInputFile, err := filepath.Abs(inputFile)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute path: %v\n", err)
-			return
-		}
-
-		absOutputDir, err := filepath.Abs(traceConfig.FlowOutputDirectory)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to get absolute output path: %v\n", err)
-			return
-		}
-
-		// Use our wrapper script
-		wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
-		if _, err := os.Stat(wrapperScript); err != nil {
-			consoleLog("[TRACE-ERROR] Wrapper script not found: %v\n", err)
-			return
-		}
-
-		consoleLog("[TRACE] Running CICFlowMeter wrapper script...\n")
-		cmd := exec.Command(wrapperScript, absInputFile, absOutputDir)
-		output, err := cmd.CombinedOutput()
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error running CICFlowMeter: %v\nOutput: %s\n", err, output)
-		} else {
-			consoleLog("[TRACE] CICFlowMeter execution successful\n%s\n", string(output))
-		}
-
-		// Verify files were created in our flow output directory
-		files, err := filepath.Glob(filepath.Join(absOutputDir, "*.csv"))
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Error checking output directory: %v\n", err)
-		} else if len(files) > 0 {
-			consoleLog("[TRACE] Found %d CSV files in output directory\n", len(files))
-		} else {
-			consoleLog("[TRACE-WARNING] No CSV files found in output directory, creating default\n")
-			
-			// Create a simple CSV with headers as fallback
-			defaultOutputFile := filepath.Join(absOutputDir, baseNameWithoutExt+"_Flow.csv")
-			headers := "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s\n"
-			if err := os.WriteFile(defaultOutputFile, []byte(headers), 0644); err != nil {
-				consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", err)
-			} else {
-				consoleLog("[TRACE] Created default flow file: %s\n", defaultOutputFile)
-			}
-		}
-	}
 }
 
 // collectTraces continuously collects trace files from the pod
@@ -927,6 +666,19 @@ java -Djava.library.path=./jnetpcap/linux/jnetpcap-1.4.r1425 -jar build/libs/CIC
 		consoleLog("[TRACE-WARNING] CICFlowMeter jar file not found at %s\n", jarFilePath)
 	} else {
 		consoleLog("[TRACE] Found CICFlowMeter jar file at %s\n", jarFilePath)
+	}
+
+	// Check if run_cicflow.sh script exists and is executable
+	cicFlowRunScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
+	if _, err := os.Stat(cicFlowRunScript); os.IsNotExist(err) {
+		consoleLog("[TRACE-ERROR] CICFlowMeter run script not found at %s\n", cicFlowRunScript)
+	} else {
+		// Make script executable
+		if err := os.Chmod(cicFlowRunScript, 0755); err != nil {
+			consoleLog("[TRACE-WARNING] Failed to make CICFlowMeter run script executable: %v\n", err)
+		} else {
+			consoleLog("[TRACE] CICFlowMeter run script is executable.\n")
+		}
 	}
 
 	// Change back to original directory

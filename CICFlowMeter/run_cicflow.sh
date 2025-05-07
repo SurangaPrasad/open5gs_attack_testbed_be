@@ -7,7 +7,8 @@ if [ "$#" -lt "1" ]; then
 fi
 
 INPUT_FILE="$1"
-OUTPUT_DIR="${2:-./output_flows}"
+# Use absolute path for output directory with a default
+OUTPUT_DIR="${2:-/home/open5gs1/Documents/open5gs-be/flow_output}"
 
 echo "=== CICFlowMeter Wrapper ==="
 echo "Input file: $INPUT_FILE"
@@ -32,7 +33,7 @@ echo "Using classpath: $CLASSPATH"
 # Setup Java library path
 JAVA_LIB_PATH="jnetpcap/linux/jnetpcap-1.4.r1425"
 
-# Create output folders
+# Create output folders - using absolute paths
 mkdir -p "output_flows"
 mkdir -p "$OUTPUT_DIR"
 
@@ -77,18 +78,30 @@ tshark -r "$INPUT_FILE" -T fields -e frame.time_epoch -e ip.src -e ip.dst -e tcp
     fi
 done
 
-# Copy output to the target directory
+# Copy output to the target directory - ensure we use absolute path
 FLOW_FILE="output_flows/${BASENAME}_Flow.csv"
 if [ -f "$FLOW_FILE" ]; then
+    # Ensure OUTPUT_DIR is absolute
+    if [[ "$OUTPUT_DIR" != /* ]]; then
+        OUTPUT_DIR="$(pwd)/$OUTPUT_DIR"
+    fi
+    
     cp "$FLOW_FILE" "$OUTPUT_DIR/"
     echo "Created flow file: $(basename "$FLOW_FILE")"
     echo "Copied to $OUTPUT_DIR/"
+    
+    # Verify the file was copied successfully
+    if [ -f "$OUTPUT_DIR/$(basename "$FLOW_FILE")" ]; then
+        echo "Verified file exists in destination: $OUTPUT_DIR/$(basename "$FLOW_FILE")"
+    else
+        echo "WARNING: File not found in destination after copy operation"
+    fi
 else
     echo "Failed to create flow file"
-    # Create a default minimal flow file
+    # Create a default minimal flow file directly in the output directory
     echo "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s" > "$OUTPUT_DIR/${BASENAME}_Flow.csv"
     echo "$(date +%s),0.0.0.0,0.0.0.0,0,0,UDP,0,0,0" >> "$OUTPUT_DIR/${BASENAME}_Flow.csv"
-    echo "Created default flow file as fallback"
+    echo "Created default flow file as fallback directly in: $OUTPUT_DIR"
 fi
 
 echo "Process complete!"
