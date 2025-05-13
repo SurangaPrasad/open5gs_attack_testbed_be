@@ -1,12 +1,16 @@
 package handlers
 
 import (
+	"encoding/json"
 	"fmt"
+	"io/ioutil"
 	"net/http"
 	"os"
 	"os/exec"
 	"path/filepath"
+	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	"context"
@@ -45,6 +49,28 @@ var traceConfig = TraceCollectorConfig{
 	StripeUtilityPath:    "/home/open5gs1/Documents/open5gs-be/stripe/stripe",
 	CICFlowMeterPath:     "/home/open5gs1/Documents/open5gs-be/CICFlowMeter",
 }
+
+// Added structures to work with decision tree models
+type DecisionTreeNode struct {
+	Node      int                `json:"node"`
+	Feature   string             `json:"feature"`
+	Threshold float64            `json:"threshold"`
+	Value     [][]float64        `json:"value"`
+	Children  []DecisionTreeNode `json:"children"`
+}
+
+// Mapping of class indices to attack types
+var ATTACK_CLASSES = map[int]string{
+	0: "BENIGN",
+	1: "Intra_UPF_UE_DoS",
+	2: "DDoS",
+	3: "GTP_ENCAPSULATION",
+	4: "GTP_ENCAPSULATION",
+}
+
+// Cache to track analyzed files and avoid redundant processing
+var analyzedFiles = make(map[string]bool)
+var analyzedFilesMutex sync.Mutex
 
 // StartTraceCollector initializes and starts the trace collector
 func StartTraceCollector(clientset *kubernetes.Clientset) gin.HandlerFunc {
@@ -217,69 +243,95 @@ func findUPFPod(clientset *kubernetes.Clientset) (string, error) {
 
 // generateFlowSessions processes a PCAP file with CICFlowMeter to generate network flow sessions
 func generateFlowSessions(inputFile string, consoleLog func(format string, args ...interface{})) {
-	baseName := filepath.Base(inputFile)
-	baseNameWithoutExt := strings.TrimSuffix(baseName, filepath.Ext(baseName))
+	baseName := filepath.Base(inputFile) // e.g., gtp_removed_capture_20250507_122302.pcap
 
-	consoleLog("[TRACE] Generating flow sessions for %s using CICFlowMeter...\n", inputFile)
+	consoleLog("[TRACE] Generating flow sessions for %s using pre-built CICFlowMeter...\n", inputFile)
 
-	// Get absolute paths
+	// Ensure the configured flow output directory exists
+	if err := os.MkdirAll(traceConfig.FlowOutputDirectory, 0755); err != nil {
+		consoleLog("[TRACE-ERROR] Failed to create flow output directory '%s': %v\n", traceConfig.FlowOutputDirectory, err)
+		return
+	}
+
+	// CICFlowMeter typically creates output files named like <input_pcap_filename>_Flow.csv
+	// For example, if inputFile is "mycapture.pcap", output is "mycapture.pcap_Flow.csv"
+	outputFilename := baseName + "_Flow.csv" // e.g., gtp_removed_capture_20250507_122302.pcap_Flow.csv
+	targetOutputFile := filepath.Join(traceConfig.FlowOutputDirectory, outputFilename)
+
+	// Check if already processed by looking for the specific output file
+	if _, err := os.Stat(targetOutputFile); err == nil {
+		consoleLog("[TRACE] Flow file %s already exists in output directory '%s', skipping generation...\n", outputFilename, traceConfig.FlowOutputDirectory)
+		analyzeFlowFile(targetOutputFile, consoleLog) // Still analyze if it exists
+		return
+	}
+
+	// Get absolute paths for the script arguments
 	absInputFile, err := filepath.Abs(inputFile)
 	if err != nil {
-		consoleLog("[TRACE-ERROR] Failed to get absolute path for input: %v\n", err)
+		consoleLog("[TRACE-ERROR] Failed to get absolute path for input file '%s': %v\n", inputFile, err)
 		return
 	}
 
-	// Use absolute path for flow output directory
-	absFlowOutputDir := "/home/open5gs1/Documents/open5gs-be/flow_output"
-
-	// Create the flow output directory if it does not exist
-	if err := os.MkdirAll(absFlowOutputDir, 0755); err != nil {
-		consoleLog("[TRACE-ERROR] Failed to create flow output directory: %v\n", err)
-		return
-	}
-
-	// Check if already processed
-	outputFilename := baseNameWithoutExt + "_Flow.csv"
-	targetOutputFile := filepath.Join(absFlowOutputDir, outputFilename)
-
-	if _, err := os.Stat(targetOutputFile); err == nil {
-		consoleLog("[TRACE] Flow file %s already exists in output directory, skipping...\n", outputFilename)
-		return
-	}
-
-	// Use our wrapper script with absolute paths
-	wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
-	if _, err := os.Stat(wrapperScript); err != nil {
-		consoleLog("[TRACE-ERROR] Wrapper script not found: %v\n", err)
-		return
-	}
-
-	consoleLog("[TRACE] Running CICFlowMeter wrapper script...\n")
-	cmd := exec.Command(wrapperScript, absInputFile, absFlowOutputDir)
-	output, err := cmd.CombinedOutput()
+	absOutputDir, err := filepath.Abs(traceConfig.FlowOutputDirectory)
 	if err != nil {
-		consoleLog("[TRACE-ERROR] Error running CICFlowMeter: %v\nOutput: %s\n", err, output)
-	} else {
-		consoleLog("[TRACE] CICFlowMeter execution successful\n%s\n", string(output))
+		consoleLog("[TRACE-ERROR] Failed to get absolute path for output directory '%s': %v\n", traceConfig.FlowOutputDirectory, err)
+		return
 	}
 
-	// Verify files were created in our flow output directory
-	files, err := filepath.Glob(filepath.Join(absFlowOutputDir, "*.csv"))
-	if err != nil {
-		consoleLog("[TRACE-ERROR] Error checking output directory: %v\n", err)
-	} else if len(files) > 0 {
-		consoleLog("[TRACE] Found %d CSV files in output directory\n", len(files))
-	} else {
-		consoleLog("[TRACE-WARNING] No CSV files found in output directory, creating default\n")
+	// Use the new direct wrapper script
+	wrapperScriptPath := filepath.Join(traceConfig.CICFlowMeterPath, "run_cfm_direct.sh")
+	if _, err := os.Stat(wrapperScriptPath); os.IsNotExist(err) {
+		consoleLog("[TRACE-ERROR] CICFlowMeter direct wrapper script not found at %s. Run setup first.\n", wrapperScriptPath)
+		return
+	}
 
-		// Create a simple CSV with headers as fallback
-		defaultOutputFile := filepath.Join(absFlowOutputDir, baseNameWithoutExt+"_Flow.csv")
-		headers := "timestamp,src_ip,dst_ip,src_port,dst_port,protocol,flow_duration,flow_byts_s,flow_pkts_s\n"
-		if err := os.WriteFile(defaultOutputFile, []byte(headers), 0644); err != nil {
-			consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", err)
+	consoleLog("[TRACE] Running CICFlowMeter direct wrapper script '%s' for pcap '%s' outputting to '%s'\n", wrapperScriptPath, absInputFile, absOutputDir)
+	cmd := exec.Command(wrapperScriptPath, absInputFile, absOutputDir)
+	cmdOutput, cmdErr := cmd.CombinedOutput()
+
+	if cmdErr != nil {
+		consoleLog("[TRACE-ERROR] Error running CICFlowMeter direct wrapper script: %v\nOutput:\n%s\n", cmdErr, string(cmdOutput))
+		// Even if there's an error, check if the target file was created, as cfm might still produce output
+		if _, statErr := os.Stat(targetOutputFile); statErr == nil {
+			consoleLog("[TRACE] Target output file '%s' was found despite script error. Attempting to analyze.\n", targetOutputFile)
+			analyzeFlowFile(targetOutputFile, consoleLog)
 		} else {
-			consoleLog("[TRACE] Created default flow file: %s\n", defaultOutputFile)
+			consoleLog("[TRACE] Target output file '%s' not found after script error.\n", targetOutputFile)
 		}
+		return // Stop further processing for this file if script failed significantly
+	}
+
+	consoleLog("[TRACE] CICFlowMeter direct wrapper script execution successful.\nOutput:\n%s\n", string(cmdOutput))
+
+	// Verify the specific target output file was created
+	if _, err := os.Stat(targetOutputFile); os.IsNotExist(err) {
+		consoleLog("[TRACE-WARNING] Expected output file '%s' not found in '%s' after CICFlowMeter execution.\n", outputFilename, absOutputDir)
+		// Attempt to find any CSV in case of naming variations, though less ideal
+		files, globErr := filepath.Glob(filepath.Join(absOutputDir, "*.csv"))
+		if globErr != nil || len(files) == 0 {
+			consoleLog("[TRACE-WARNING] No CSV files found in output directory '%s'.\n", absOutputDir)
+			// Create a simple CSV with headers as fallback if no file is found at all
+			// This part might be removed if not desired for cfm direct execution
+			defaultOutputFile := filepath.Join(absOutputDir, baseName+"_Flow_default.csv") // different name for default
+			headers := "Flow ID,Src IP,Src Port,Dst IP,Dst Port,Protocol,Timestamp,Flow Duration,Tot Fwd Pkts,Tot Bwd Pkts,TotLen Fwd Pkts,TotLen Bwd Pkts,Fwd Pkt Len Max,Fwd Pkt Len Min,Fwd Pkt Len Mean,Fwd Pkt Len Std,Bwd Pkt Len Max,Bwd Pkt Len Min,Bwd Pkt Len Mean,Bwd Pkt Len Std,Flow Byts/s,Flow Pkts/s,Flow IAT Mean,Flow IAT Std,Flow IAT Max,Flow IAT Min,Fwd IAT Tot,Fwd IAT Mean,Fwd IAT Std,Fwd IAT Max,Fwd IAT Min,Bwd IAT Tot,Bwd IAT Mean,Bwd IAT Std,Bwd IAT Max,Bwd IAT Min,Fwd PSH Flags,Bwd PSH Flags,Fwd URG Flags,Bwd URG Flags,Fwd Header Len,Bwd Header Len,Fwd Pkts/s,Bwd Pkts/s,Pkt Len Min,Pkt Len Max,Pkt Len Mean,Pkt Len Std,Pkt Len Var,FIN Flag Cnt,SYN Flag Cnt,RST Flag Cnt,PSH Flag Cnt,ACK Flag Cnt,URG Flag Cnt,CWE Flag Count,ECE Flag Cnt,Down/Up Ratio,Pkt Size Avg,Fwd Seg Size Avg,Bwd Seg Size Avg,Fwd Byts/b Avg,Fwd Pkts/b Avg,Fwd Blk Rate Avg,Bwd Byts/b Avg,Bwd Pkts/b Avg,Bwd Blk Rate Avg,Subflow Fwd Pkts,Subflow Fwd Byts,Subflow Bwd Pkts,Subflow Bwd Byts,Init Fwd Win Byts,Init Bwd Win Byts,Fwd Act Data Pkts,Fwd Seg Size Min,Active Mean,Active Std,Active Max,Active Min,Idle Mean,Idle Std,Idle Max,Idle Min\n"
+			if writeErr := os.WriteFile(defaultOutputFile, []byte(headers), 0644); writeErr != nil {
+				consoleLog("[TRACE-ERROR] Failed to create default flow file: %v\n", writeErr)
+			} else {
+				consoleLog("[TRACE] Created default (empty) flow file: %s\n", defaultOutputFile)
+			}
+			return // Don't analyze if the expected file isn't there
+		} else {
+			consoleLog("[TRACE] Found other CSV files: %v. Attempting to analyze the first one if relevant, but expected '%s'.\n", files, outputFilename)
+			// This logic might need refinement if multiple unexpected files are created.
+			// For now, we will proceed to analyze the specific targetOutputFile if it was found, otherwise warn.
+		}
+	}
+
+	// Analyze the generated flow file if it exists
+	if _, err := os.Stat(targetOutputFile); err == nil {
+		analyzeFlowFile(targetOutputFile, consoleLog)
+	} else {
+		consoleLog("[TRACE-WARNING] Final check: Expected output file '%s' still not found. Cannot analyze.\n", targetOutputFile)
 	}
 }
 
@@ -322,7 +374,7 @@ func processTraceFile(inputFile string, consoleLog func(format string, args ...i
 
 	// Set directory permissions to ensure we can write to it
 	if err := os.Chmod(absProcessedDir, 0755); err != nil {
-		consoleLog("[TRACE-WARNING] Failed to set permissions on processed directory: %v\n")
+		consoleLog("[TRACE-WARNING] Failed to set permissions on processed directory: %v\n", err)
 	}
 
 	// Pre-create an empty output file with correct permissions
@@ -395,7 +447,7 @@ func collectTraces(clientset *kubernetes.Clientset, stopChan <-chan struct{}) {
 
 	// Install CICFlowMeter dependencies if needed
 	if err := setupCICFlowMeter(consoleLog); err != nil {
-		consoleLog("[TRACE-ERROR] Failed to setup CICFlowMeter: %v\n", err)
+		consoleLog("[TRACE-ERROR] Failed to setup CICFlowMeter: %v\n")
 	}
 
 	for {
@@ -513,179 +565,340 @@ func collectTraces(clientset *kubernetes.Clientset, stopChan <-chan struct{}) {
 	}
 }
 
-// setupCICFlowMeter ensures CICFlowMeter is properly installed and ready to use
+// setupCICFlowMeter ensures the environment is ready to run the pre-built CICFlowMeter.
 func setupCICFlowMeter(consoleLog func(format string, args ...interface{})) error {
-	// Check if CICFlowMeter directory exists
-	if _, err := os.Stat(traceConfig.CICFlowMeterPath); os.IsNotExist(err) {
-		consoleLog("[TRACE-ERROR] CICFlowMeter directory not found at %s\n", traceConfig.CICFlowMeterPath)
-		return err
-	}
+	consoleLog("[TRACE] Verifying pre-built CICFlowMeter setup...\n")
 
 	// Make stripe utility executable
 	consoleLog("[TRACE] Verifying stripe utility at %s\n", traceConfig.StripeUtilityPath)
 	if _, err := os.Stat(traceConfig.StripeUtilityPath); os.IsNotExist(err) {
 		consoleLog("[TRACE-ERROR] Stripe utility not found at %s\n", traceConfig.StripeUtilityPath)
 		return fmt.Errorf("stripe utility not found at %s", traceConfig.StripeUtilityPath)
+	}
+	if err := os.Chmod(traceConfig.StripeUtilityPath, 0755); err != nil {
+		consoleLog("[TRACE-WARNING] Failed to make stripe executable (may proceed if already executable): %v\n", err)
 	} else {
-		// Make stripe executable
-		if err := os.Chmod(traceConfig.StripeUtilityPath, 0755); err != nil {
-			consoleLog("[TRACE-WARNING] Failed to make stripe executable: %v\n", err)
-			return fmt.Errorf("failed to make stripe executable: %v", err)
-		} else {
-			consoleLog("[TRACE] Stripe utility is executable.\n")
-		}
+		consoleLog("[TRACE] Stripe utility is executable.\n")
 	}
 
-	// Change to CICFlowMeter directory
-	currentDir, err := os.Getwd()
+	// Define the path to the pre-built cfm executable
+	// This path is fixed based on the user's successful manual execution.
+	cfmExecutableDir := "/home/open5gs1/Documents/open5gs-be/CICFlowMeter_extracted/CICFlowMeter-4.0/bin/"
+	cfmExecutableName := "cfm"
+	cfmExecutablePath := filepath.Join(cfmExecutableDir, cfmExecutableName)
+
+	// Check if cfm executable exists
+	if _, err := os.Stat(cfmExecutablePath); os.IsNotExist(err) {
+		consoleLog("[TRACE-ERROR] Pre-built CICFlowMeter executable not found at %s.\n", cfmExecutablePath)
+		return fmt.Errorf("pre-built CICFlowMeter executable not found at %s", cfmExecutablePath)
+	}
+	consoleLog("[TRACE] Found CICFlowMeter executable at %s\n", cfmExecutablePath)
+
+	// Ensure cfm executable is actually executable
+	if err := os.Chmod(cfmExecutablePath, 0755); err != nil {
+		consoleLog("[TRACE-WARNING] Failed to make CICFlowMeter executable at %s (may proceed if already executable): %v\n", cfmExecutablePath, err)
+	} else {
+		consoleLog("[TRACE] CICFlowMeter executable at %s is now executable.\n")
+	}
+
+	// Path for the new wrapper script that generateFlowSessions will call
+	// This script will be placed in traceConfig.CICFlowMeterPath (e.g., /home/open5gs1/Documents/open5gs-be/CICFlowMeter/run_cfm_direct.sh)
+	wrapperScriptPath := filepath.Join(traceConfig.CICFlowMeterPath, "run_cfm_direct.sh")
+
+	// Content for the run_cfm_direct.sh wrapper script
+	wrapperContent := fmt.Sprintf(`#!/bin/bash
+# This script runs the pre-built CICFlowMeter directly.
+
+CFM_DIR="%s"
+CFM_EXEC_NAME="%s"
+PCAP_FILE="$1"      # Absolute path to the input PCAP file
+OUTPUT_DIR="$2"     # Absolute path to the output directory
+
+# Log received arguments
+echo "run_cfm_direct.sh: Received PCAP_FILE: ${PCAP_FILE}"
+echo "run_cfm_direct.sh: Received OUTPUT_DIR: ${OUTPUT_DIR}"
+
+if [ -z "${PCAP_FILE}" ]; then
+    echo "run_cfm_direct.sh: Error - PCAP_FILE argument is missing."
+    exit 1
+fi
+
+if [ -z "${OUTPUT_DIR}" ]; then
+    echo "run_cfm_direct.sh: Error - OUTPUT_DIR argument is missing."
+    exit 1
+fi
+
+if [ ! -f "${CFM_DIR}/${CFM_EXEC_NAME}" ]; then
+    echo "run_cfm_direct.sh: Error - CICFlowMeter executable not found at ${CFM_DIR}/${CFM_EXEC_NAME}"
+    exit 1
+fi
+
+echo "run_cfm_direct.sh: Changing directory to ${CFM_DIR}"
+cd "${CFM_DIR}" || { echo "run_cfm_direct.sh: Failed to cd to ${CFM_DIR}"; exit 1; }
+
+echo "run_cfm_direct.sh: Executing: ./${CFM_EXEC_NAME} \"${PCAP_FILE}\" \"${OUTPUT_DIR}\""
+./${CFM_EXEC_NAME} "${PCAP_FILE}" "${OUTPUT_DIR}"
+EXIT_CODE=$?
+echo "run_cfm_direct.sh: CICFlowMeter finished with exit code ${EXIT_CODE}"
+
+exit ${EXIT_CODE}
+`, cfmExecutableDir, cfmExecutableName)
+
+	if err := os.WriteFile(wrapperScriptPath, []byte(wrapperContent), 0755); err != nil {
+		consoleLog("[TRACE-ERROR] Failed to create CICFlowMeter direct wrapper script at %s: %v\n", wrapperScriptPath, err)
+		return fmt.Errorf("failed to create CICFlowMeter direct wrapper script: %v", err)
+	}
+	consoleLog("[TRACE] Successfully created/updated CICFlowMeter direct wrapper script at %s\n", wrapperScriptPath)
+
+	consoleLog("[TRACE] CICFlowMeter direct execution setup completed.\n")
+	return nil
+}
+
+// analyzeFlowFile checks if a CSV flow file contains network anomalies or attacks
+func analyzeFlowFile(filePath string, consoleLog func(format string, args ...interface{})) {
+	// Check if this file has already been analyzed
+	analyzedFilesMutex.Lock()
+	if _, exists := analyzedFiles[filePath]; exists {
+		consoleLog("[TRACE-ANALYZE] File %s was already analyzed, skipping.\n", filePath)
+		analyzedFilesMutex.Unlock()
+		return
+	}
+	analyzedFiles[filePath] = true
+	analyzedFilesMutex.Unlock()
+
+	consoleLog("[TRACE-ANALYZE] Analyzing flow file: %s\n", filePath)
+
+	// Load decision tree model
+	tree, err := loadDecisionTree()
 	if err != nil {
-		return fmt.Errorf("failed to get current directory: %v", err)
+		consoleLog("[TRACE-ANALYZE-ERROR] Failed to load decision tree model: %v\n", err)
+		return
 	}
 
-	if err := os.Chdir(traceConfig.CICFlowMeterPath); err != nil {
-		return fmt.Errorf("failed to change to CICFlowMeter directory: %v", err)
+	// Read CSV file
+	data, err := os.ReadFile(filePath)
+	if err != nil {
+		consoleLog("[TRACE-ANALYZE-ERROR] Failed to read CSV file: %v\n", err)
+		return
 	}
 
-	// Make gradlew executable if it's not already
-	gradlewPath := filepath.Join(traceConfig.CICFlowMeterPath, "gradlew")
-	if err := os.Chmod(gradlewPath, 0755); err != nil {
-		consoleLog("[TRACE-WARNING] Failed to make gradlew executable: %v\n", err)
-	} else {
-		consoleLog("[TRACE] gradlew is now executable.\n")
+	lines := strings.Split(string(data), "\n")
+	if len(lines) < 2 {
+		consoleLog("[TRACE-ANALYZE-WARNING] CSV file has no data rows\n")
+		return
 	}
 
-	consoleLog("[TRACE] Setting up CICFlowMeter...\n")
+	// Parse header to get column indices
+	header := strings.Split(lines[0], ",")
+	// Declare featureIndices as a local variable
+	featureIndices := make(map[string]int)
+	for i, column := range header {
+		featureIndices[column] = i
+	}
 
-	// Check if the output_flows directory exists, if not create it
-	outputFlowsDir := filepath.Join(traceConfig.CICFlowMeterPath, "output_flows")
-	if _, err := os.Stat(outputFlowsDir); os.IsNotExist(err) {
-		if err := os.MkdirAll(outputFlowsDir, 0755); err != nil {
-			consoleLog("[TRACE-WARNING] Failed to create output_flows directory: %v\n", err)
-		} else {
-			consoleLog("[TRACE] Created output_flows directory.\n")
+	// Statistics for attack detection
+	totalFlows := 0
+	attackFlows := 0
+	attackTypes := make(map[string]int)
+
+	// Process each flow (row in the CSV)
+	for i := 1; i < len(lines); i++ {
+		line := lines[i]
+		if len(strings.TrimSpace(line)) == 0 {
+			continue
+		}
+
+		totalFlows++
+
+		// Parse the flow record
+		flowRecord := strings.Split(line, ",")
+
+		// Get prediction for this flow
+		classIndex, attackType := predictFlow(tree, flowRecord, featureIndices)
+
+		// If not normal traffic, count as attack
+		if classIndex != 0 {
+			attackFlows++
+			attackTypes[attackType]++
 		}
 	}
 
-	// Check if jnetpcap is installed
-	consoleLog("[TRACE] Checking jnetpcap installation...\n")
-
-	// Detect OS type
-	var jnetpcapPath string
-	if _, err := os.Stat("/etc/os-release"); err == nil {
-		// Linux
-		jnetpcapPath = filepath.Join(traceConfig.CICFlowMeterPath, "jnetpcap", "linux", "jnetpcap-1.4.r1425")
-	} else {
-		// Assume Windows
-		jnetpcapPath = filepath.Join(traceConfig.CICFlowMeterPath, "jnetpcap", "win", "jnetpcap-1.4.r1425")
+	// Calculate attack percentage
+	attackPercentage := 0.0
+	if totalFlows > 0 {
+		attackPercentage = float64(attackFlows) / float64(totalFlows) * 100.0
 	}
 
-	// Check if jar file exists
-	jarPath := filepath.Join(jnetpcapPath, "jnetpcap.jar")
-	if _, err := os.Stat(jarPath); os.IsNotExist(err) {
-		consoleLog("[TRACE-ERROR] jnetpcap.jar not found at %s\n", jarPath)
-		os.Chdir(currentDir)
-		return fmt.Errorf("jnetpcap.jar not found at %s", jarPath)
-	} else {
-		consoleLog("[TRACE] Found jnetpcap.jar at %s\n", jarPath)
+	// Log the results
+	consoleLog("[TRACE-ANALYZE] Analysis results for %s:\n", filepath.Base(filePath))
+	consoleLog("[TRACE-ANALYZE] Total flows: %d\n", totalFlows)
+	consoleLog("[TRACE-ANALYZE] Attack flows: %d (%.2f%%)\n", attackFlows, attackPercentage)
+
+	// Log each attack type found
+	for attackType, count := range attackTypes {
+		consoleLog("[TRACE-ANALYZE] %s attacks: %d (%.2f%%)\n",
+			attackType, count, float64(count)/float64(totalFlows)*100.0)
 	}
 
-	// Install jnetpcap to local Maven repo
-	consoleLog("[TRACE] Installing jnetpcap to local Maven repository...\n")
-	cmd := exec.Command("mvn", "install:install-file",
-		"-Dfile="+jarPath,
-		"-DgroupId=org.jnetpcap",
-		"-DartifactId=jnetpcap",
-		"-Dversion=1.4.1",
-		"-Dpackaging=jar")
+	// Write to attack detection log
+	logPath := filepath.Join(filepath.Dir(traceConfig.FlowOutputDirectory), "logs", "attack_detection.log")
+	os.MkdirAll(filepath.Dir(logPath), 0755)
 
-	if output, err := cmd.CombinedOutput(); err != nil {
-		consoleLog("[TRACE-ERROR] Failed to install jnetpcap: %v\nOutput: %s\n", err, output)
-		// Continue anyway, as it might be already installed
-	} else {
-		consoleLog("[TRACE] jnetpcap installed successfully.\n")
+	attackTypesStr := ""
+	for attackType, count := range attackTypes {
+		if len(attackTypesStr) > 0 {
+			attackTypesStr += ", "
+		}
+		attackTypesStr += fmt.Sprintf("%s:%d", attackType, count)
 	}
 
-	// Modify the build.gradle file to fix Java version issues
-	buildGradlePath := filepath.Join(traceConfig.CICFlowMeterPath, "build.gradle")
-	if _, err := os.Stat(buildGradlePath); err == nil {
-		consoleLog("[TRACE] Modifying build.gradle to fix Java version issues...\n")
+	// Convert timestamp to date-time string
+	timestamp := time.Now().Format("2006-01-02 15:04:05")
+	logLine := fmt.Sprintf("%s,%s,%d,%d,%.2f,%s\n",
+		timestamp, filepath.Base(filePath), totalFlows, attackFlows, attackPercentage, attackTypesStr)
 
-		// Read the current build.gradle file
-		buildGradleContent, err := os.ReadFile(buildGradlePath)
-		if err != nil {
-			consoleLog("[TRACE-ERROR] Failed to read build.gradle: %v\n", err)
+	// Append to log file
+	f, err := os.OpenFile(logPath, os.O_APPEND|os.O_CREATE|os.O_WRONLY, 0644)
+	if err == nil {
+		defer f.Close()
+		if _, err := f.WriteString(logLine); err != nil {
+			consoleLog("[TRACE-ANALYZE-ERROR] Failed to write to log file: %v\n", err)
+		}
+	} else {
+		consoleLog("[TRACE-ANALYZE-ERROR] Failed to open log file: %v\n", err)
+	}
+
+	// Alert if attack percentage is high
+	if attackPercentage > 30.0 {
+		consoleLog("[TRACE-ANALYZE-ALERT] HIGH ATTACK PERCENTAGE (%.2f%%) DETECTED in %s\n",
+			attackPercentage, filepath.Base(filePath))
+	}
+}
+
+// predictFlow applies the decision tree to classify a flow record
+func predictFlow(tree DecisionTreeNode, flowRecord []string, featureIndices map[string]int) (int, string) {
+	node := tree
+
+	for len(node.Children) > 0 {
+		feature := node.Feature
+		threshold := node.Threshold
+
+		// Handle leaf nodes
+		if feature == "leaf" {
+			break
+		}
+
+		// Get feature index
+		featureIndex, exists := featureIndices[feature]
+		if !exists {
+			// Feature not found, go left
+			node = node.Children[0]
+			continue
+		}
+
+		// Get the feature value from the flow record
+		var value float64 = 0
+		if featureIndex < len(flowRecord) {
+			value, _ = strconv.ParseFloat(flowRecord[featureIndex], 64)
+		}
+
+		// Determine which branch to take
+		if value <= threshold {
+			node = node.Children[0]
 		} else {
-			// Add Java compatibility settings
-			modifiedContent := string(buildGradleContent)
-			if !strings.Contains(modifiedContent, "sourceCompatibility") {
-				insertPoint := strings.Index(modifiedContent, "apply plugin: 'java'")
-				if insertPoint >= 0 {
-					javaSettings := `
-apply plugin: 'java'
-sourceCompatibility = '1.8'
-targetCompatibility = '1.8'
-`
-					modifiedContent = strings.Replace(modifiedContent, "apply plugin: 'java'", javaSettings, 1)
+			node = node.Children[1]
+		}
+	}
 
-					if err := os.WriteFile(buildGradlePath, []byte(modifiedContent), 0644); err != nil {
-						consoleLog("[TRACE-ERROR] Failed to update build.gradle: %v\n", err)
-					} else {
-						consoleLog("[TRACE] Successfully updated build.gradle with Java version settings.\n")
-					}
+	// Get the predicted class from the leaf node
+	probabilities := node.Value[0]
+	maxProbability := 0.0
+	predictedClass := 0
+
+	for i, probability := range probabilities {
+		if probability > maxProbability {
+			maxProbability = probability
+			predictedClass = i
+		}
+	}
+
+	return predictedClass, ATTACK_CLASSES[predictedClass]
+}
+
+// loadDecisionTree reads and parses the decision tree model from JSON file
+func loadDecisionTree() (DecisionTreeNode, error) {
+	var tree DecisionTreeNode
+
+	// Construct path to decision tree JSON file
+	treePath := filepath.Join(filepath.Dir(traceConfig.FlowOutputDirectory), "utils", "decision_tree.json")
+
+	// Read the file
+	data, err := ioutil.ReadFile(treePath)
+	if err != nil {
+		return tree, fmt.Errorf("failed to read decision tree file: %v", err)
+	}
+
+	// Parse JSON
+	err = json.Unmarshal(data, &tree)
+	if err != nil {
+		return tree, fmt.Errorf("failed to parse decision tree JSON: %v", err)
+	}
+
+	return tree, nil
+}
+
+// Add a function to monitor the flow output directory for new files
+func monitorFlowOutputDirectory(consoleLog func(format string, args ...interface{})) {
+	// Create a ticker to periodically check the directory
+	ticker := time.NewTicker(30 * time.Second)
+	defer ticker.Stop()
+
+	processedFiles := make(map[string]bool)
+
+	for {
+		select {
+		case <-ticker.C:
+			// Find all CSV files in the flow output directory
+			files, err := filepath.Glob(filepath.Join(traceConfig.FlowOutputDirectory, "*.csv"))
+			if err != nil {
+				consoleLog("[TRACE-MONITOR-ERROR] Error scanning flow directory: %v\n", err)
+				continue
+			}
+
+			// Process any new files
+			for _, file := range files {
+				baseFileName := filepath.Base(file)
+				if _, exists := processedFiles[baseFileName]; !exists {
+					// Mark as processed and analyze
+					processedFiles[baseFileName] = true
+					consoleLog("[TRACE-MONITOR] Found new flow file: %s\n", baseFileName)
+
+					// Run analysis in a goroutine to avoid blocking
+					go analyzeFlowFile(file, consoleLog)
 				}
 			}
 		}
 	}
+}
 
-	// Create a simple wrapper script to run CICFlowMeter
-	wrapperScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_flowmeter.sh")
-	wrapperContent := `#!/bin/bash
-cd "$(dirname "$0")"
-java -Djava.library.path=./jnetpcap/linux/jnetpcap-1.4.r1425 -jar build/libs/CICFlowMeter.jar "$@"
-`
-	if err := os.WriteFile(wrapperScript, []byte(wrapperContent), 0755); err != nil {
-		consoleLog("[TRACE-ERROR] Failed to create wrapper script: %v\n", err)
-	} else {
-		consoleLog("[TRACE] Created CICFlowMeter wrapper script.\n")
-	}
+// Start the flow output directory monitor when the trace collector starts
+func init() {
+	// This function will be called when the package is initialized
+	go func() {
+		// Wait a bit for configuration to be properly set
+		time.Sleep(5 * time.Second)
 
-	// Try building the project
-	consoleLog("[TRACE] Building CICFlowMeter project with gradle...\n")
-	buildCmd := exec.Command("./gradlew", "build", "-x", "test")
-
-	if output, err := buildCmd.CombinedOutput(); err != nil {
-		consoleLog("[TRACE-ERROR] Failed to build CICFlowMeter: %v\nOutput: %s\n", err, output)
-		// Continue anyway, as it might already be built
-	} else {
-		consoleLog("[TRACE] CICFlowMeter built successfully.\n")
-	}
-
-	// Check for compiled jar file
-	jarFilePath := filepath.Join(traceConfig.CICFlowMeterPath, "build", "libs", "CICFlowMeter.jar")
-	if _, err := os.Stat(jarFilePath); os.IsNotExist(err) {
-		consoleLog("[TRACE-WARNING] CICFlowMeter jar file not found at %s\n", jarFilePath)
-	} else {
-		consoleLog("[TRACE] Found CICFlowMeter jar file at %s\n", jarFilePath)
-	}
-
-	// Check if run_cicflow.sh script exists and is executable
-	cicFlowRunScript := filepath.Join(traceConfig.CICFlowMeterPath, "run_cicflow.sh")
-	if _, err := os.Stat(cicFlowRunScript); os.IsNotExist(err) {
-		consoleLog("[TRACE-ERROR] CICFlowMeter run script not found at %s\n", cicFlowRunScript)
-	} else {
-		// Make script executable
-		if err := os.Chmod(cicFlowRunScript, 0755); err != nil {
-			consoleLog("[TRACE-WARNING] Failed to make CICFlowMeter run script executable: %v\n", err)
-		} else {
-			consoleLog("[TRACE] CICFlowMeter run script is executable.\n")
+		// Create console log function for the monitor
+		consoleLog := func(format string, args ...interface{}) {
+			message := fmt.Sprintf(format, args...)
+			fmt.Print(message)
+			os.Stdout.Sync() // Force flush
 		}
-	}
 
-	// Change back to original directory
-	if err := os.Chdir(currentDir); err != nil {
-		return fmt.Errorf("failed to change back to original directory: %v", err)
-	}
+		// Ensure log directory exists
+		os.MkdirAll(filepath.Join(filepath.Dir(traceConfig.FlowOutputDirectory), "logs"), 0755)
 
-	consoleLog("[TRACE] CICFlowMeter setup completed.\n")
-	return nil
+		// Start monitoring
+		monitorFlowOutputDirectory(consoleLog)
+	}()
 }
